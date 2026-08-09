@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ballmar-reflector"
+version = "0.1.0"
+description = "Balmar SG200 SmartLink (RS-485) to Signal K UDP reflector"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Kurt" }]
+# No runtime dependencies: uses Python's built-in SocketCAN support (Linux only).
+
+[project.scripts]
+ballmar-reflector = "ballmar_reflector.app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

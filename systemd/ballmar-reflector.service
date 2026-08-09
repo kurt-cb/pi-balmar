@@ -1,0 +1,14 @@
+[Unit]
+Description=Balmar SG200 SmartLink (RS-485) -> Signal K UDP reflector
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Note: the current target Pi (rpcan2) runs Alpine/OpenRC — use openrc/
+# instead. This unit is for a systemd-based Pi.
+ExecStart=/opt/ballmar/bin/ballmar-reflector --device /dev/ttySC0 --host 192.168.4.1 --port 4123
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

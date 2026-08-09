@@ -1,0 +1,24 @@
+#!/sbin/openrc-run
+# OpenRC service for Alpine Linux (rpcan2).
+# Install: cp openrc/ballmar-reflector.initd /etc/init.d/ballmar-reflector
+#          chmod +x /etc/init.d/ballmar-reflector
+#          rc-update add ballmar-reflector default
+#          rc-service ballmar-reflector start
+
+name="ballmar-reflector"
+description="Balmar SG200 SmartLink (RS-485) -> Signal K UDP reflector"
+
+: ${REFLECTOR_BIN:=/opt/ballmar/bin/ballmar-reflector}
+: ${REFLECTOR_ARGS:=--device /dev/ttySC0 --host 192.168.4.1 --port 4123}
+
+command="${REFLECTOR_BIN}"
+command_args="${REFLECTOR_ARGS}"
+command_background="yes"
+pidfile="/run/${RC_SVCNAME}.pid"
+output_log="/var/log/${RC_SVCNAME}.log"
+error_log="/var/log/${RC_SVCNAME}.log"
+
+depend() {
+	need net
+	after firewall
+}
