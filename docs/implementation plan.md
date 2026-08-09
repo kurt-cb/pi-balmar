@@ -50,9 +50,28 @@ thermal concern for either the Pi or the MP1584 at headless load.
 7. Install OpenRC service (`openrc/ballmar-reflector.initd`),
    `lbu commit -d`.
 
-## Future option
+## Future options
 
-NMEA 2000 reporting via the hat's unused CAN port (drop cable to the
+### Long-term host: Victron Cerbo GX MK2
+
+The Cerbo (already aboard) may replace the Pi entirely:
+
+- **Venus OS Large** runs a Signal K server on the Cerbo → reflector
+  sends deltas to `127.0.0.1`, eliminating the WiFi hop.
+- No native RS-485: use an **isolated USB→RS-485 adapter**
+  (`/dev/ttyUSB0`); SmartLink's RS-485 tolerates the cable run from the
+  engine bay to the Cerbo's mounting spot.
+- Reflector is stdlib-only by design: copy `src/` to `/data` (survives
+  firmware updates), run with `--device /dev/ttyUSB0`, hook via
+  `/data/rc.local`.
+- Later possibility: a Victron D-Bus service (dbus-serialbattery style)
+  to surface Balmar data on the GX touchscreen and VRM.
+- Sequencing: finish the MC-618 decode on the Pi rig first; migrate
+  once the page map is stable.
+
+### NMEA 2000 reporting
+
+Via the Pi hat's unused CAN port (drop cable to the
 backbone): standard PGNs cover volts/amps/temp (127508), SOC/SOH/
 alternator DC-type (127506), charge stage (127507). Needs an N2K
 sender implementation (ISO address claim + fast-packet). Field % /
