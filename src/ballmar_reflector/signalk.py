@@ -1,8 +1,14 @@
-"""Signal K delta construction and UDP transport."""
+"""Signal K delta construction and UDP/TCP transport."""
 
 import datetime
 import json
 import socket
+import sys
+import threading
+
+
+def _log(msg):
+    print(msg, file=sys.stderr, flush=True)
 
 
 def build_delta(values, label="balmar-sg200"):
@@ -48,3 +54,55 @@ class UdpSender:
             # when the network returns.
             self.errors += 1
             return False
+
+
+class TcpServerSender:
+    """Serve deltas to Signal K over TCP: we listen (dual-stack v4+v6),
+    the Signal K server connects as a client (data connection type
+    "Signal K", source TCP, host = this Pi, port = ours). This sidesteps
+    signalk-server's UDP input being IPv4-only."""
+
+    def __init__(self, port):
+        self.clients = []
+        self.lock = threading.Lock()
+        self.sent = 0
+        self.errors = 0
+        srv = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            srv.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+        except OSError:
+            pass
+        srv.bind(("::", port))
+        srv.listen(4)
+        _log(f"serving Signal K deltas on tcp port {port}")
+        threading.Thread(target=self._accept_loop, args=(srv,),
+                         daemon=True).start()
+
+    def _accept_loop(self, srv):
+        while True:
+            conn, addr = srv.accept()
+            conn.settimeout(1.0)
+            with self.lock:
+                self.clients.append((conn, addr[0]))
+            _log(f"signalk connected from {addr[0]}")
+
+    def send(self, payload: bytes) -> bool:
+        any_ok = False
+        with self.lock:
+            for conn, ip in list(self.clients):
+                try:
+                    conn.sendall(payload)
+                    any_ok = True
+                except OSError:
+                    self.clients.remove((conn, ip))
+                    try:
+                        conn.close()
+                    except OSError:
+                        pass
+                    _log(f"signalk client {ip} disconnected")
+        if any_ok:
+            self.sent += 1
+        else:
+            self.errors += 1
+        return any_ok

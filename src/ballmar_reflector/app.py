@@ -30,7 +30,7 @@ import termios
 import time
 
 from . import smartlink
-from .signalk import UdpSender, build_delta
+from .signalk import TcpServerSender, UdpSender, build_delta
 
 BAUDS = {9600: termios.B9600, 19200: termios.B19200, 38400: termios.B38400,
          57600: termios.B57600, 115200: termios.B115200,
@@ -127,6 +127,11 @@ def parse_args(argv=None):
     p.add_argument("--port", type=int, default=4123,
                    help="UDP port of the Signal K 'Signal K over UDP' "
                         "data connection (default: 4123)")
+    p.add_argument("--listen", type=int, metavar="PORT",
+                   help="serve deltas as a TCP server on this port; the "
+                        "Signal K server connects to us (data connection "
+                        "type Signal K, source TCP). Works over IPv6, "
+                        "unlike signalk's UDP input.")
     p.add_argument("--map", action="append", default=[], metavar="ADDR=PREFIX",
                    help="map a bus address to a Signal K path prefix "
                         "(manual alternative to config-file device names)")
@@ -152,15 +157,17 @@ def parse_args(argv=None):
                    help="seconds between stats lines on stderr (0=off)")
 
     defaults = {k: cfg[k] for k in
-                ("device", "baud", "host", "port", "poll_interval",
+                ("device", "baud", "host", "port", "listen", "poll_interval",
                  "min_period", "stats_interval") if k in cfg}
     if cfg.get("poll"):
         defaults["poll"] = ",".join(str(x) for x in cfg["poll"])
     p.set_defaults(**defaults)
     args = p.parse_args(argv)
 
-    if not (args.dump or args.console or args.discover or args.host):
-        p.error("--host is required unless --dump/--console/--discover is given")
+    if not (args.dump or args.console or args.discover or args.host
+            or args.listen):
+        p.error("--host or --listen is required unless "
+                "--dump/--console/--discover is given")
 
     if args.poll:
         try:
@@ -229,9 +236,13 @@ def resolve_devices(fd, parser, args):
 
 
 def run(args):
-    sender = UdpSender(args.host, args.port) if args.host else None
-    if sender:
+    senders = []
+    if args.host:
+        senders.append(UdpSender(args.host, args.port))
         log(f"reflecting {args.device} -> udp://{args.host}:{args.port}")
+    if args.listen:
+        senders.append(TcpServerSender(args.listen))
+    sender = senders or None
 
     parser = smartlink.FrameParser()
     writable = bool(args.poll_pages or args.name_config
@@ -336,14 +347,15 @@ def run(args):
                     print(f"{ts}  {path} = {value}", flush=True)
             if sender:
                 delta = build_delta(due)
-                if sender.send(delta) and args.verbose:
+                ok = any([s.send(delta) for s in senders])
+                if ok and args.verbose:
                     print(delta.decode().rstrip(), flush=True)
 
         if args.stats_interval > 0 and now - last_stats >= args.stats_interval:
+            tx = " ".join(f"{type(s).__name__}: sent={s.sent} errors={s.errors}"
+                          for s in senders)
             log(f"stats: frames={n_frames} page_responses={n_pages} "
-                f"bad_bytes={parser.bad_bytes}"
-                + (f" udp_sent={sender.sent} udp_errors={sender.errors}"
-                   if sender else ""))
+                f"bad_bytes={parser.bad_bytes} {tx}")
             last_stats = now
 
 

@@ -4,15 +4,19 @@
   "host": "fd00:108::6010",
   "port": 4123,
   "poll_interval": 1.0,
-
   "devices": {
     "BANK-01": {
       "report": true,
       "prefix": "electrical.batteries.0",
-      "pages": ["0x03", "0x05", "0x06"]
+      "pages": [
+        "0x03",
+        "0x05",
+        "0x06"
+      ]
     },
     "EXAMPLE-NOT-REPORTED": {
       "report": false
     }
-  }
+  },
+  "listen": 4123
 }
