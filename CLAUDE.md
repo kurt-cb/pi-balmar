@@ -9,9 +9,12 @@ exists for SmartLink — the protocol was reverse-engineered here (see
 
 ## Hardware
 
-- **Pi:** "rpcan2", Alpine Linux (OpenRC, `apk`, PEP 668 → use venv,
-  `lbu commit -d` if diskless). SSH: `kgodwin@` or `root@` (192.168.4.70
-  on the bench network).
+- **Pi:** "rpcan2" — **Pi 3B+** (was a CM4 with no WiFi chip; SD + hat
+  moved over 2026-08-09). Alpine Linux, sys-mode install (OpenRC, `apk`,
+  PEP 668 → venv; **no lbu needed**). SSH: `kgodwin@` or `root@`; bench
+  eth0 DHCP (last seen 192.168.4.89), wlan0 configured for kghome-e24 /
+  kghome-lte (boat) / totaldns-uplink. Reflector runs as OpenRC service
+  → `udp://kgboat-nmea2000.lan:4123` (boat Signal K box, Raspbian 13).
 - **Hat:** Waveshare RS485 CAN HAT (B). SmartLink is wired to **RS485_0
   A/B** → `/dev/ttySC0` @ 115200 8N1 (`sc16is752-spi1` overlay). The CAN
   side is unused — SmartLink is NOT NMEA 2000.
