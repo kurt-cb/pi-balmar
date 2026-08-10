@@ -14,6 +14,7 @@ Reverse-engineered from live captures (see docs/rs-485 decode.md):
 FRAME_START = 0xCD
 ADDR_SHUNT = 0x02
 CMD_STATUS = 0x00
+CMD_IDENT = 0x04
 CMD_PAGE = 0x15
 
 # Raw value meaning "not available" (blank on the display).
@@ -83,6 +84,16 @@ class FrameParser:
                 self.bad_bytes += 1
                 del self._buf[:1]
         return frames
+
+
+def parse_identity(payload: bytes):
+    """Decode a cmd 0x04 identity response payload -> (header_hex, name).
+    Observed layout (SG200 shunt): 8 header bytes (status/type/version?)
+    followed by a NUL-padded ASCII name ("BANK-01")."""
+    if len(payload) < 9:
+        return payload.hex(" "), ""
+    name = payload[8:].split(b"\x00")[0].decode("ascii", "replace")
+    return payload[:8].hex(" "), name
 
 
 def decode_page_response(payload: bytes):

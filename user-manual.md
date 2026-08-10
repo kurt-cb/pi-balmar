@@ -19,15 +19,41 @@ rc-service ballmar-reflector status|start|stop|restart
 tail -f /var/log/ballmar-reflector.log        # startup lines + stats every 5 min
 ```
 
-Configuration lives in **`/etc/conf.d/ballmar-reflector`**:
+The service runs `--config /etc/ballmar-reflector.json` (set in
+`/etc/conf.d/ballmar-reflector`). **Devices are configured by the name
+stored in the device itself** (shown by `--discover`), so the same
+config works no matter what bus address a device uses:
+
+```json
+{
+  "device": "/dev/ttySC0",
+  "host": "fd00:108::6010",
+  "port": 4123,
+  "devices": {
+    "BANK-01": { "report": true,
+                 "prefix": "electrical.batteries.0",
+                 "pages": ["0x03", "0x05", "0x06"] }
+  }
+}
+```
+
+At startup the reflector scans the bus, matches names to the config,
+reports configured devices on their `prefix`, and logs (but does not
+report) unknown devices. Configured-but-absent devices are rescanned
+every 60 s until they appear. `"report": false` silences a device.
+Edit the file, then `rc-service ballmar-reflector restart`.
+
+## Discovering devices
 
 ```
-REFLECTOR_BIN=/usr/local/bin/ballmar-reflector
-REFLECTOR_ARGS="--device /dev/ttySC0 --host kgboat-nmea2000.lan --port 4123 \
-                --map 0x02=electrical.batteries.house --poll 0x03,0x05,0x06"
+rc-service ballmar-reflector stop
+PYTHONPATH=/root/pi-ballmar/src python3 -m ballmar_reflector.app --discover
+rc-service ballmar-reflector start
 ```
 
-Edit args, then `rc-service ballmar-reflector restart`.
+Prints every responding SmartLink address with its status byte and
+configured name — this is how the MC-618s' names will be learned on
+the boat. Copy the names into the config's `devices` section.
 
 ## Passive mode vs master mode
 

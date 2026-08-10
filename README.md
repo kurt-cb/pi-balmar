@@ -47,14 +47,12 @@ Options: `-d/--device` (default `/dev/ttySC0`), `--baud` (115200),
 `--min-period` (per-path rate limit), `--poll-interval`, `-v`,
 `--stats-interval`.
 
-Multiple devices on one bus map to separate Signal K paths by their
-SmartLink address (default: `0x02=electrical.batteries.house`):
-
-```
-ballmar-reflector --host ... \
-    --map 0x00=electrical.alternators.0 \
-    --map 0x01=electrical.alternators.1
-```
+Production setups use a JSON config (`--config`, see
+`config.example.json`): devices are keyed by the **name stored in the
+device itself** (`ballmar-reflector --discover` lists them), each with
+`report`, Signal K `prefix`, and `pages` to poll. The bus is scanned at
+startup to resolve names to addresses; unknown devices are logged, not
+reported. `--map ADDR=prefix` remains for quick manual runs.
 
 Survives serial errors and WiFi dropouts by retrying.
 
