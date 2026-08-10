@@ -27,7 +27,7 @@ config works no matter what bus address a device uses:
 ```json
 {
   "device": "/dev/ttySC0",
-  "host": "fd00:108::6010",
+  "host": "kgboat-nmea2000.lan",
   "port": 4123,
   "devices": {
     "BANK-01": { "report": true,
@@ -93,11 +93,40 @@ too and it prints *and* relays.
 `--dump` prints unknown pages too (`page=0x?? (?)`) — that plus
 `tools/uartcap.py` is the protocol-discovery workflow for the MC-618s.
 
-## Signal K side (server: kgboat-nmea2000.lan)
+## Signal K side — transports & settings
 
-Server → Data Connections → Add: Input Type **Signal K**, protocol
-**UDP**, port **4123**. Values appear under the `--map` prefix, e.g.
-`electrical.batteries.house.voltage` (V), `.current` (A),
+Server: `kgboat-nmea2000` — boat LAN `192.168.12.72` /
+`kgboat-nmea2000.lan` (DHCP; the name is the stable handle), VPN
+overlay `fd00:108::6010`. Data connections live under
+**Server → Data Connections**; restart the server after changes.
+Form settings for either transport: Data Type **SignalK**,
+'self' handling **"No 'self' mapping"** (our deltas carry no context,
+so they map to the own vessel automatically), Override timestamps off.
+The connection ID becomes the `$source` label shown next to values.
+
+**UDP — production (Pi on the boat LAN).** signalk-server's UDP input
+binds **IPv4 only**, so it works when Pi and server share the boat
+LAN (192.168.12.0/24), not across the routed-IPv6 home link.
+
+- server connection: ID `balmar-reflector`, SignalK Source **UDP**,
+  Port **4123**
+- reflector config: `"host": "kgboat-nmea2000.lan", "port": 4123`
+  (the sender prefers the IPv4 address when a name resolves to both)
+
+**TCP — reflector serves, Signal K dials in.** Direction is inverted:
+the reflector listens (`"listen": 4123` in the config, instead of or
+alongside `host`), and the server connects out to the Pi — node's TCP
+client is dual-stack, so this is the transport that works across
+routed IPv6 (proven bench→boat 2026-08-09, then retired).
+
+- server connection: ID `balmar-reflector-tcp`, SignalK Source **TCP**,
+  Host = the Pi's address (bench: `fd00:1::151`), Port **4123**
+
+Keep exactly one transport enabled per environment: UDP on the boat;
+TCP only for bench-to-boat demos (disable/delete otherwise).
+
+Values appear under each device's configured `prefix`, e.g.
+`electrical.batteries.0.voltage` (V), `.current` (A),
 `.capacity.stateOfCharge` (0–1).
 
 ## WiFi

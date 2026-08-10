@@ -42,8 +42,15 @@ class UdpSender:
     def send(self, payload: bytes) -> bool:
         try:
             if self.sock is None:
-                info = socket.getaddrinfo(self.host, self.port,
-                                          type=socket.SOCK_DGRAM)[0]
+                # Prefer IPv4: signalk-server's UDP input binds IPv4 only,
+                # so an AAAA record must not win over an A record.
+                try:
+                    info = socket.getaddrinfo(self.host, self.port,
+                                              socket.AF_INET,
+                                              socket.SOCK_DGRAM)[0]
+                except socket.gaierror:
+                    info = socket.getaddrinfo(self.host, self.port,
+                                              type=socket.SOCK_DGRAM)[0]
                 self.sock = socket.socket(info[0], socket.SOCK_DGRAM)
                 self.target = info[4]
             self.sock.sendto(payload, self.target)
