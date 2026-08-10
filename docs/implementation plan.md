@@ -69,9 +69,30 @@ The Cerbo (already aboard) may replace the Pi entirely:
 - Sequencing: finish the MC-618 decode on the Pi rig first; migrate
   once the page map is stable.
 
+### RV-C input on the hat's CAN port (planned)
+
+The full production system is bigger than the two MC-618s:
+**4 shunts** on the house batteries, the alternator charger, and a
+**Xantrex SW3000 inverter/charger**. The SW3000 speaks **RV-C** —
+250 kbit/s CAN, J1939 framing, publicly documented DGNs
+(DC_SOURCE_STATUS_1/2/3, CHARGER_STATUS, INVERTER_STATUS, …) — and
+will be wired to the hat's currently unused CAN port.
+
+Plan: add an `rvc.py` input module (stdlib SocketCAN, like the
+original CAN prototype) decoding the relevant DGNs table-driven from
+the RV-C spec, feeding the same delta pipeline/config as SmartLink
+(devices keyed by RV-C source address or instance, `values` names,
+`prefix`). No reverse engineering required.
+
+Also to verify: Balmar SG200 documentation suggests SmartLink is
+RV-C-aligned, and an **RV-C mode** on the SG200 may expose more data
+than the display protocol — check the manual / test on the bench.
+
 ### NMEA 2000 reporting
 
-Via the Pi hat's unused CAN port (drop cable to the
+Via the Pi hat's unused CAN port (shared with RV-C? bitrates match at
+250k, but RV-C and N2K on one physical bus is nonstandard — likely
+pick one per port) (drop cable to the
 backbone): standard PGNs cover volts/amps/temp (127508), SOC/SOH/
 alternator DC-type (127506), charge stage (127507). Needs an N2K
 sender implementation (ISO address claim + fast-packet). Field % /

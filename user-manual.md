@@ -32,10 +32,14 @@ config works no matter what bus address a device uses:
   "devices": {
     "BANK-01": { "report": true,
                  "prefix": "electrical.batteries.0",
-                 "pages": ["0x03", "0x05", "0x06"] }
+                 "values": ["soc", "voltage", "current"] }
   }
 }
 ```
+
+`values` uses friendly names from the decoded page table (`soc`,
+`voltage`, `current` — grows as pages are decoded); raw page codes
+(`"0x03"`) also work, e.g. while probing pages that have no name yet.
 
 At startup the reflector scans the bus, matches names to the config,
 reports configured devices on their `prefix`, and logs (but does not

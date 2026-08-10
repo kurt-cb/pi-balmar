@@ -30,6 +30,21 @@ PAGES = {
     0x06: ("current", "current", lambda v: v / 1000.0),  # mA signed, confirmed by load test
 }
 
+# Friendly name -> page code, for configs ("values": ["voltage", ...]).
+PAGE_BY_NAME = {name: page for page, (name, _, _) in PAGES.items()}
+
+
+def parse_page(token):
+    """Accept a page as a friendly name ('voltage') or number ('0x05')."""
+    try:
+        return int(str(token), 0)
+    except ValueError:
+        page = PAGE_BY_NAME.get(str(token).lower())
+        if page is None:
+            raise ValueError(
+                f"unknown value '{token}' (known: {', '.join(PAGE_BY_NAME)})")
+        return page
+
 
 def checksum(data) -> int:
     return (-sum(data)) & 0xFF

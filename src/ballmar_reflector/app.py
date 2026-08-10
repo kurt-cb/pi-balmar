@@ -171,9 +171,10 @@ def parse_args(argv=None):
 
     if args.poll:
         try:
-            args.poll_pages = [int(x, 0) for x in str(args.poll).split(",")]
-        except ValueError:
-            p.error("--poll expects comma-separated integers, e.g. 0x03,0x05")
+            args.poll_pages = [smartlink.parse_page(x)
+                               for x in str(args.poll).split(",")]
+        except ValueError as e:
+            p.error(str(e))
     else:
         args.poll_pages = []
 
@@ -192,10 +193,15 @@ def parse_args(argv=None):
     # "pages": ["0x03", ...]}} — resolved to addresses by bus scan.
     args.name_config = {}
     for name, dev in cfg.get("devices", {}).items():
+        try:
+            pages = [smartlink.parse_page(x)
+                     for x in dev.get("values", dev.get("pages", []))]
+        except ValueError as e:
+            p.error(f"device '{name}': {e}")
         args.name_config[name] = {
             "report": dev.get("report", True),
             "prefix": dev["prefix"].rstrip(".") + "." if dev.get("prefix") else None,
-            "pages": [int(x, 0) for x in dev.get("pages", [])],
+            "pages": pages,
         }
     if args.name_config and not args.poll_pages and not any(
             d["pages"] for d in args.name_config.values()):
