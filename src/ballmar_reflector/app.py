@@ -74,14 +74,17 @@ def parse_args(argv=None):
                    help="rate-limit per Signal K path, seconds (default: 1.0)")
     p.add_argument("--dump", action="store_true",
                    help="print every decoded frame; no UDP target required")
+    p.add_argument("--console", action="store_true",
+                   help="print decoded Signal K values to the screen instead "
+                        "of (or in addition to) sending UDP; no --host needed")
     p.add_argument("-v", "--verbose", action="store_true",
                    help="print each delta sent")
     p.add_argument("--stats-interval", type=float, default=300.0,
                    help="seconds between stats lines on stderr (0=off)")
     args = p.parse_args(argv)
 
-    if not args.dump and not args.host:
-        p.error("--host is required unless --dump is given")
+    if not args.dump and not args.console and not args.host:
+        p.error("--host is required unless --dump or --console is given")
     if args.poll:
         try:
             args.poll_pages = [int(x, 0) for x in args.poll.split(",")]
@@ -143,15 +146,24 @@ def run(args):
                 continue
             raise
 
-        # Active polling: one page per round-robin tick.
+        # Active polling: mimic the display's cadence. Each tick sends a
+        # status poll (cmd 0x00) plus one page request, round-robin over
+        # (device, page). The status poll matters: after bus silence the
+        # SG200 shunt idles and ignores page reads until master-style
+        # traffic resumes (verified on the bench, 2026-08-09).
         if args.poll_pages and time.monotonic() >= next_poll:
+            targets = list(args.device_map) or [smartlink.ADDR_SHUNT]
+            addr = targets[(poll_idx // len(args.poll_pages)) % len(targets)]
             page = args.poll_pages[poll_idx % len(args.poll_pages)]
             poll_idx += 1
             try:
-                os.write(fd, smartlink.build_page_request(page))
+                os.write(fd, smartlink.build_frame(addr, smartlink.CMD_STATUS))
+                time.sleep(0.01)
+                os.write(fd, smartlink.build_page_request(page, addr))
             except OSError as e:
                 log(f"poll write failed: {e}")
-            next_poll = time.monotonic() + args.poll_interval / max(1, len(args.poll_pages))
+            next_poll = time.monotonic() + args.poll_interval / max(
+                1, len(args.poll_pages) * len(targets))
 
         values = []
         for addr, cmd, payload in parser.feed(data):
@@ -190,10 +202,15 @@ def run(args):
                 last_sent[path] = now
                 last_value[path] = value
 
-        if due and sender:
-            delta = build_delta(due)
-            if sender.send(delta) and args.verbose:
-                print(delta.decode().rstrip(), flush=True)
+        if due:
+            if args.console:
+                ts = time.strftime("%H:%M:%S")
+                for path, value in due:
+                    print(f"{ts}  {path} = {value}", flush=True)
+            if sender:
+                delta = build_delta(due)
+                if sender.send(delta) and args.verbose:
+                    print(delta.decode().rstrip(), flush=True)
 
         if args.stats_interval > 0 and now - last_stats >= args.stats_interval:
             log(f"stats: frames={n_frames} page_responses={n_pages} "

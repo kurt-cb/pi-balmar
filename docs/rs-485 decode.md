@@ -69,6 +69,40 @@ addresses and page codes are unmapped — capture with
 address, so the two regulators separate cleanly into distinct Signal K
 paths via `--map` (no bus re-addressing needed).
 
+## Timing (measured 2026-08-09, bench)
+
+Display as master — one 186 ms cycle (~5.4 Hz):
+
+```
++  0 ms  cd 81 11 00 a1     keepalive 0x81
++ 36 ms  cd 82 11 00 a0     keepalive 0x82
++ 49 ms  cd 02 00 00 31     status poll -> shunt answers <10 ms
++ 68 ms  cd 03 00 00 30     poll 0x03 (never answered on bench)
+         page request (cmd 0x15) inserted every ~2.7 s
+```
+
+Pi as master — rate sweep against the shunt:
+
+| tick/page | status→page gap | answered | latency (median/p95) |
+|-----------|-----------------|----------|----------------------|
+| 333 ms    | 10 ms           | 92 %     | 13 / 24 ms |
+| 150 ms    | 10 ms           | 96 %     | 15 / 30 ms |
+| 75 ms     | 10 ms           | **99 %** | 10 / 27 ms |
+| 40 ms     | 10 ms           | 97 %     | 10 / 25 ms |
+| 75 ms     | 2 ms            | 15 %     | — |
+| 75 ms     | 0 ms            | **0 %**  | — |
+
+Conclusions:
+
+- Poll rate is not a constraint (shunt keeps up at 25 req/s).
+- **≥10 ms of quiet between consecutive TX frames is mandatory** —
+  back-to-back frames are ignored entirely.
+- After bus silence the shunt idles and ignores page reads until
+  master-style traffic (status polls) resumes; the reflector's poll
+  mode handles the wake automatically.
+- Master handover works: Pi requests interleaved with a live display
+  cause no visible disruption (tested before display removal).
+
 ## Open questions
 
 - Page codes for SOH / time-to-go / Ah (all N/A on the bench w/ full battery)
