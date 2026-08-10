@@ -84,6 +84,22 @@ the RV-C spec, feeding the same delta pipeline/config as SmartLink
 (devices keyed by RV-C source address or instance, `values` names,
 `prefix`). No reverse engineering required.
 
+Wiring notes (SW3000 tap):
+- The hat's CAN port is **galvanically isolated** (B0505LS-1W +
+  digital isolator, SM24CANB TVS, polyfuses) — no ground-loop risk.
+- The SW3000's two RJ-45 jacks are daisy-chain ports (same bus). If
+  the empty one holds a **terminator plug**, displacing it needs the
+  hat's 120 Ω CAN jumper enabled to re-terminate.
+- **Check the manual's RJ-45 pinout before crimping** — Xanbus-style
+  ports carry ~15 V network power on some pins. Connect CAN-H/CAN-L
+  only.
+- First contact in **listen-only mode** (cannot disturb the display's
+  session, not even ACK bits):
+  `ip link set can0 up type can bitrate 250000 listen-only on`
+- Verify on the wire whether frames are RV-C or Xantrex Xanbus —
+  Freedom SW gear is historically Xanbus; both are 250 kbit/s CAN,
+  the DGN/PGN layout decides what rvc.py must decode.
+
 Also to verify: Balmar SG200 documentation suggests SmartLink is
 RV-C-aligned, and an **RV-C mode** on the SG200 may expose more data
 than the display protocol — check the manual / test on the bench.
