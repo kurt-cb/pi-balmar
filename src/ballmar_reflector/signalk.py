@@ -12,16 +12,22 @@ def _log(msg):
 
 
 def build_delta(values, label="balmar-sg200"):
-    """values: list of (path, value). Returns one newline-terminated
-    JSON delta, ready to send to a Signal K UDP connection."""
+    """values: list of (path, value, device_name). Returns one
+    newline-terminated JSON delta with one update block per device.
+    device_name is set as the source 'talker' so Signal K renders
+    $source as '<connection-id>.<device-name>' (e.g.
+    'balmar-reflector.BANK-01') instead of the '<id>.XX' fallback."""
     ts = datetime.datetime.now(datetime.timezone.utc).isoformat(
         timespec="milliseconds").replace("+00:00", "Z")
+    by_dev = {}
+    for p, v, dev in values:
+        by_dev.setdefault(dev or "smartlink", []).append({"path": p, "value": v})
     delta = {
         "updates": [{
-            "source": {"label": label, "type": "serial"},
+            "source": {"label": label, "type": "serial", "talker": dev},
             "timestamp": ts,
-            "values": [{"path": p, "value": v} for p, v in values],
-        }]
+            "values": vals,
+        } for dev, vals in by_dev.items()]
     }
     return (json.dumps(delta, separators=(",", ":")) + "\n").encode("ascii")
 

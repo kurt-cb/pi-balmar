@@ -178,11 +178,13 @@ def parse_args(argv=None):
         args.poll_pages = []
 
     # Address-keyed map (bench/manual use).
+    # device_map: addr -> (prefix, device_name-for-$source)
     args.device_map = {}
     for m in args.map:
         try:
             addr, prefix = m.split("=", 1)
-            args.device_map[int(addr, 0)] = prefix.rstrip(".") + "."
+            a = int(addr, 0)
+            args.device_map[a] = (prefix.rstrip(".") + ".", f"0x{a:02X}")
         except ValueError:
             p.error(f"bad --map '{m}', expected ADDR=PREFIX")
 
@@ -201,7 +203,8 @@ def parse_args(argv=None):
             "passive listening only")
 
     if not args.device_map and not args.name_config:
-        args.device_map = {smartlink.ADDR_SHUNT: "electrical.batteries.0."}
+        args.device_map = {smartlink.ADDR_SHUNT:
+                           ("electrical.batteries.0.", "shunt")}
     return args
 
 
@@ -229,7 +232,7 @@ def resolve_devices(fd, parser, args):
         log(f"device '{name}' found at 0x{addr:02X}"
             + (f" -> {dev['prefix']}" if dev["report"] and dev["prefix"] else " (report off)"))
         if dev["report"] and dev["prefix"]:
-            device_map[addr] = dev["prefix"]
+            device_map[addr] = (dev["prefix"], name)
         pages = dev["pages"] or args.poll_pages
         rotation += [(addr, pg) for pg in pages]
     return device_map, rotation, unmatched
@@ -325,26 +328,27 @@ def run(args):
                       f"raw={raw} status=0x{status:02X}", flush=True)
             if known is None or raw == smartlink.NOT_AVAILABLE:
                 continue
-            prefix = device_map.get(addr)
-            if prefix is None:
+            entry = device_map.get(addr)
+            if entry is None:
                 continue
+            prefix, devname = entry
             _, suffix, scale = known
-            values.append((prefix + suffix, scale(raw)))
+            values.append((prefix + suffix, scale(raw), devname))
 
         now = time.monotonic()
         due = []
-        for path, value in values:
+        for path, value, devname in values:
             if now - last_sent.get(path, 0) >= args.min_period or \
                value != last_value.get(path):
-                due.append((path, value))
+                due.append((path, value, devname))
                 last_sent[path] = now
                 last_value[path] = value
 
         if due:
             if args.console:
                 ts = time.strftime("%H:%M:%S")
-                for path, value in due:
-                    print(f"{ts}  {path} = {value}", flush=True)
+                for path, value, devname in due:
+                    print(f"{ts}  [{devname}] {path} = {value}", flush=True)
             if sender:
                 delta = build_delta(due)
                 ok = any([s.send(delta) for s in senders])
