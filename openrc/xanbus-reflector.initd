@@ -1,0 +1,23 @@
+#!/sbin/openrc-run
+# OpenRC service for Alpine Linux (rpcan2).
+# Xantrex Xanbus (CAN) -> Signal K. Deliberately separate from
+# ballmar-reflector: it only touches can0, so SmartLink probing on
+# /dev/ttySC0 cannot disturb it.
+
+name="xanbus-reflector"
+description="Xantrex SW3000 Xanbus (CAN) -> Signal K UDP reflector"
+
+: ${REFLECTOR_BIN:=/usr/local/bin/xanbus-reflector}
+: ${REFLECTOR_ARGS:=--config /etc/xanbus-reflector.json}
+
+command="${REFLECTOR_BIN}"
+command_args="${REFLECTOR_ARGS}"
+command_background="yes"
+pidfile="/run/${RC_SVCNAME}.pid"
+output_log="/var/log/${RC_SVCNAME}.log"
+error_log="/var/log/${RC_SVCNAME}.log"
+
+depend() {
+	need net
+	after firewall
+}

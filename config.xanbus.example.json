@@ -1,0 +1,8 @@
+{
+  "interface": "can0",
+  "host": "kgboat-nmea2000.lan",
+  "port": 4123,
+  "prefix": "electrical.inverters.sw3000",
+  "min_period": 1.0,
+  "stats_interval": 300.0
+}

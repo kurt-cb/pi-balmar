@@ -103,11 +103,280 @@ Conclusions:
 - Master handover works: Pi requests interleaved with a live display
   cause no visible disruption (tested before display removal).
 
+## Boat bus survey (2026-08-12, engine OFF — regulators unpowered)
+
+First capture on the production bus. Quality is good: 595 frames /
+3,074 bytes in 20 s with **0 bad bytes**, so wiring and termination are
+sound.
+
+`--discover` (full 0x00-0xFF scan) — exactly one responder:
+
+```
+addr   status  name       header
+0x02   0x00    GATEWAY    00 03 23 04 17 00 00 00
+```
+
+`0x02` "GATEWAY" is the Balmar **BLE** gateway. The Balmar **NMEA 2000**
+gateway is a *separate* device and was **not connected** during any of
+this session's captures — do not conflate the two.
+
+**The BLE gateway IS the bus master** — CONFIRMED 2026-08-12 by
+unplugging it: the bus went completely silent (no frames at all,
+including the regulator polling) and resumed the instant it was
+replugged.
+
+It is easy to get this wrong, and earlier revisions of this document did
+so twice — first guessing an unseen SG230, then blaming the N2K device.
+The BLE gateway also *answers* status polls at `0x02`, which looks like
+slave behaviour and implies some other device must be polling it. It
+does both. Do not infer the master from "who answers a probe": masters
+generally do not answer, so an address scan finds only the slaves.
+
+This also explains the missing Signal K battery data: `electrical.batteries`
+is absent from both Signal K servers simply because **the N2K gateway is
+unplugged**. Nothing is publishing. It was never a CAN-bitrate or
+gateway-fault problem.
+
+One ~200 ms cycle (~5 Hz), identical in shape to the bench display's
+cycle:
+
+```
+0x02 cmd 0x00  status poll   -> gateway answers 0x00
+       ~124 ms idle
+0x81 cmd 0x11  (no reply) ─┐  17-18 ms between unanswered polls
+0x82 cmd 0x11  (no reply)  │  = the master's response timeout
+0x81 cmd 0x11  (no reply)  │
+0x82 cmd 0x11  (no reply) ─┘
+```
+
+Readings:
+
+- **`0x81` / `0x82` are almost certainly the two MC-618s** (Balmar IDs
+  0/1) — two addresses, polled twice per cycle, silent only because the
+  engine is off. The bench saw the same two addresses polled with no
+  regulators present, so the master polls these slots unconditionally.
+- **`cmd 0x11` carries no page byte** (len 0), unlike the SG200's
+  per-page `cmd 0x15`. A len-0 request implies the reply is a **bulk
+  data block** — many fields in one frame — rather than one value per
+  request. UNCONFIRMED until a regulator answers.
+- Caution when that first reply lands: `FrameParser.MAX_PAYLOAD` is 32.
+  A larger regulator block would be silently discarded as bad bytes, so
+  captures must retain **raw** bytes, not just parsed frames
+  (`tools/buslog.py`).
+
+### Operational consequence: run PASSIVE on this bus
+
+The boat bus already has a permanent master polling at 5 Hz. The
+reflector must therefore run **passive** here — `--poll` would put a
+second master on the wire and collide with it. Passive is sufficient
+precisely because the master polls continuously, so regulator data will
+appear on the wire without us transmitting. (This supersedes the bench
+plan of "remove the display, then poll".) `--discover` does transmit;
+avoid running it repeatedly while the master is active.
+
+## MC-618 regulators (2026-08-12, engines RUNNING)
+
+The regulators are powered from an oil-pressure switch, so they only
+exist on the bus once an engine is running. They boot and wait a few
+seconds before enabling the field.
+
+### Identity — both units name themselves
+
+```
+0x81  name='MC-618-STBD'  header=00 01 18 05 01 00 07 00   -> HOUSE bank
+0x82  name='MC-618--POR'  header=00 01 18 05 01 00 07 00   -> ENGINE START
+```
+
+Names come from the cmd 0x04 identity read, so the reflector's
+name-keyed config resolves these without depending on bus addresses.
+
+### The master never asks for regulator data
+
+The bus master polls `0x81`/`0x82` with **cmd 0x11 only** — a keepalive,
+answered with a 1-byte `00`. Across 130k+ passively captured frames there
+was never a single cmd 0x15 page request to a regulator.
+
+**Passive listening can therefore never yield MC-618 data.** Unlike the
+SG200 bench setup (where the display requested pages and we could listen
+in), regulator data only exists if we request it ourselves.
+
+### Response format differs from the SG200 — code change required
+
+MC-618 page responses are **5 bytes** (`page + 4-byte big-endian value`),
+not the SG200's 6 (`page + value + status`):
+
+```
+SG200 :  cd 02 15 06 | page v3 v2 v1 v0 status | cksum
+MC-618:  cd 81 15 05 | page v3 v2 v1 v0        | cksum
+```
+
+`smartlink.decode_page_response()` requires `len(payload) == 6` and so
+**rejects every MC-618 reply**. It needs to accept 5-byte payloads with
+status = None before the reflector can read regulators at all.
+
+Also note `FrameParser.MAX_PAYLOAD = 32`: fine for what we have seen, but
+raise it on the instance when probing unknown pages.
+
+### Page sweep (cmd 0x15, pages 0x00-0xFF, both units)
+
+~40 pages answer. Cross-comparing the two units separates live data from
+configuration: pages identical on both are settings, pages that differ
+are per-device measurements.
+
+Live (differ between units, and drift over time):
+
+| page | STBD (house) | PORT (start) | behavior |
+|------|--------------|--------------|----------|
+| 0x06 | 154 | 153 | oscillates ±1 |
+| 0x08 | 20  | 17  | oscillates ±1 |
+| 0x0B | 642 | 656 | slow drift |
+| 0x25 | 8   | 4   | differs |
+| 0x37 | 129 | 130 | differs |
+| 0x13 | 1765564748 | 1741274483 | static — serial number |
+
+Static on both (configuration):
+
+```
+0x02=3  0x04=719  0x0F=42  0x24=4  0x26=90  0x29=1
+0x2A=769 0x2B=740 0x2C=719 0x2E=709 0x30=670 0x32=635   <- charge profile
+0x2D=3  0x2F=3  0x31=3                                   <- profile flags?
+0x33=186 0x34=162 0x35=65 0x36=65 0x39=106
+```
+
+### Voltage scaling — CONFIRMED: raw / 50 (0.02 V per count)
+
+Established by capturing the display while it was briefly working, then
+matching against what the operator read off its screen:
+
+```
+0x81 page 0x03 over the display window: 706 -> 668
+     708 / 50 = 14.16 V     <- display showed "14.1 / 14.2", charging
+     668 / 50 = 13.36 V     <- after the alternator dropped off
+```
+
+Applying /50 to the voltage-shaped pages yields a textbook Balmar 12 V
+profile, which is strong corroboration:
+
+| page | raw | volts | reading |
+|------|-----|-------|---------|
+| 0x03 | 668-708 | 13.36-14.16 | **measured battery voltage** (live) |
+| 0x04 | 671 | 13.42 | **active target voltage** |
+| 0x2C | 719 | 14.38 | absorption setpoint |
+| 0x2E | 709 | 14.18 | intermediate setpoint |
+| 0x30 | 670 | 13.40 | float setpoint |
+
+`0x04` tracking `0x30` (13.42 vs 13.40) means the regulator was in
+**float**, targeting the float setpoint — internally consistent.
+
+The wider 0x2A-0x32 run (769, 740, 719, 709, 670, 635 = 15.38, 14.80,
+14.38, 14.18, 13.40, 12.70 V) is the full programmable setpoint table.
+
+### What the display actually polls
+
+Captured passively while the display was up — 1,160 page-read frames
+across both regulators. This is Balmar's own firmware telling us which
+pages matter:
+
+```
+0x03, 0x04, 0x08, 0x05, 0x06, 0x02, 0x24, 0x2E, 0x30, 0x26, 0x2C
+```
+
+### Confirmed MC-618 pages
+
+| page | scale | meaning | how confirmed |
+|------|-------|---------|---------------|
+| 0x03 | /50 | **battery voltage** | display read 14.36 V; page read 718. Also cross-checked against the Xantrex measuring the same house bank over Xanbus: 715 = 14.30 V vs 14.25-14.27 V — two independent protocols agreeing within 0.05 V |
+| 0x08 | raw | **field %** | display read 24 %; page read 24 (osc. 24-26) |
+| 0x05 | — | **battery temperature** | display showed `--` with the sensor unplugged; page read 255 (0xFF = not available) |
+| 0x06 | **raw - 114** | **alternator temperature, °C** | 154 -> 40 C, 156 -> 42 C, 158 -> 44 C (three labelled points). NOTE: a one-point fit of `/2 - 36` also reproduces 42 C but predicts 43 where the display reads 44 — one point cannot determine both scale and offset |
+| 0x04 | /50 | active target voltage | tracks 0x30 in float, 0x2C in absorption |
+| 0x2C | /50 | absorption setpoint (14.38 V) | textbook Balmar profile |
+| 0x2E | /50 | intermediate setpoint (14.18 V) | " |
+| 0x30 | /50 | float setpoint (13.40 V) | " |
+
+`0x02` = **charge stage**, confirmed by catching a transition: it moved
+`3 -> 6` on both regulators at the same moment the active target `0x04`
+dropped from the absorption setpoint (719 = 14.38 V) to the intermediate
+setpoint (709 = 14.18 V), while candidate `0x0C` stayed at 0 throughout.
+Enum values so far: **3 = "fixed bulk"** (display-labelled); 6 = the
+stage entered when leaving absorption (not yet labelled).
+
+Still unidentified: `0x07` (255), `0x0C` (0), `0x24` (4), `0x25` (4 on
+PORT vs 8 on STBD — per-device state, not config), `0x26` (90 on both).
+
+### Max field % — a regulator setting, read once at display startup
+
+The display shows a per-regulator "max field" (60 % STBD, 80 % PORT).
+It did not appear in any steady-state capture, but that is **not**
+evidence it is absent from the bus:
+
+- The capture began after the display had already booted, so a value
+  fetched once at startup would never be seen.
+- It is static configuration — it cannot change without a setup change,
+  so there is no reason for the display to re-read it.
+- The full 0x00-0xFF sweep is not a reliable negative either: it
+  demonstrably dropped pages to collisions with the master (0x03 missing
+  on STBD, 0x30 missing on PORT, both of which certainly exist).
+
+**To capture it: power-cycle the display while recording.** The boot
+config read should show 60 on STBD and 80 on PORT — differing values on
+the two units make the identification unambiguous. The same capture
+should reveal any other write-once configuration the display reads at
+start and never requests again.
+
+### Bus topology — the display bridges TWO segments
+
+```
+SG-200 shunt  ->  display port 1        <- NOT visible to the Pi
+display port 2  ->  STBD charger  ->  Pi   <- our tap
+```
+
+This matters for interpreting captures: **the display mirrors its master
+poll cycle out both ports**, so a poll seen on our segment does not mean
+the target is on our segment. Address `0x03` (the shunt) is polled on
+port 2 and never answered there, because the SG-200 replies on port 1.
+Do not conclude "polled here, so it must live here" — an earlier
+revision of this document made exactly that error.
+
+Consequence: MC-618 regulator data reaches our tap, but **SG-200 shunt
+data cannot be seen from it**. Reading both would need a second tap on
+port 1 — the HAT's unused `RS485_1` / `/dev/ttySC1` is available for
+that.
+
+Full raw sweep: `/root/captures/2026-08-12/regprobe.out` on rpcan2.
+
+### CAUTION: sustained polling appears to hang a regulator
+
+`0x81` stopped answering the bus entirely — including the master's own
+keepalives — after receiving two full page sweeps plus ~420 rapid page
+reads (~22/s). It never recovered while the engine kept running.
+
+- It kept **regulating normally** throughout: the Xantrex measured a
+  steady 14.27 V on the house bank the whole time. Comms-only fault.
+- `0x82` received the same two sweeps but no sustained polling, and
+  stayed at a 100% reply rate for the rest of the session.
+- The BLE app was **ruled out** as the cause: two scans were recorded
+  with our bus fully passive, and `0x82` held 100% through both.
+
+Not proven, but the asymmetry points at polling rate. Before polling
+regulators continuously, test on a known-expendable unit: ~1 page/s,
+placed in the ~124 ms idle gap of the master's cycle, aborting the
+moment a reply is missed.
+
+### Gateway status byte (addr 0x02)
+
+Bit 3 (`0x08`) = **BLE app active** — confirmed by pressing scan and
+watching the status flip `0x00` -> `0x08` at that exact second.
+
 ## Open questions
 
+- Whether `cmd 0x11` returns a bulk block, and its field layout
+  (resolves the moment the engine runs)
 - Page codes for SOH / time-to-go / Ah (all N/A on the bench w/ full battery)
-- MC-618 addresses and page map (field %, alt temp, target voltage, stage)
-- Which addresses 0x81/0x82/0x03 are (SmartLink discovery slots?)
+- MC-618 field map (field %, alt temp, target voltage, stage)
+- Confirm the master is the SG230 (inferred: transmits, never answers)
+- Whether the 0x02 gateway already bridges SG230 data to NMEA 2000 — if
+  so the reflector only needs to add the MC-618 regulator data
 - Direction attribution (single shared pair — TX/RX merged in capture)
 
 ---

@@ -327,12 +327,18 @@ def run(args):
                 continue
             page, raw, status = decoded
             n_pages += 1
-            known = smartlink.PAGES.get(page)
+            # The reply layout identifies the device type: MC-618
+            # regulators answer with 5 bytes (no status), SG200-family
+            # devices with 6. Page meanings and scaling differ between
+            # them, so the right table has to be picked per frame.
+            table = smartlink.MC618_PAGES if status is None else smartlink.PAGES
+            known = table.get(page)
             if args.dump:
                 name = known[0] if known else "?"
+                st = "--" if status is None else f"0x{status:02X}"
                 print(f"addr=0x{addr:02X} page=0x{page:02X} ({name}) "
-                      f"raw={raw} status=0x{status:02X}", flush=True)
-            if known is None or raw == smartlink.NOT_AVAILABLE:
+                      f"raw={raw} status={st}", flush=True)
+            if known is None or smartlink.is_not_available(table, page, raw):
                 continue
             entry = device_map.get(addr)
             if entry is None:

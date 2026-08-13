@@ -30,8 +30,56 @@ PAGES = {
     0x06: ("current", "current", lambda v: v / 1000.0),  # mA signed, confirmed by load test
 }
 
+# MC-618 alternator regulator pages. Different device, different page
+# meanings AND different scaling from the SG200 above — do not mix the
+# two tables. Every entry below was confirmed against the Balmar display
+# (see docs/rs-485 decode.md); voltage was additionally cross-checked
+# against the Xantrex measuring the same bank over Xanbus.
+#
+# Values are emitted in Signal K SI units, so temperature is Kelvin.
+KELVIN = 273.15
+MC618_PAGES = {
+    0x03: ("voltage", "voltage", lambda v: v / 50.0),
+    0x04: ("targetVoltage", "targetVoltage", lambda v: v / 50.0),
+    0x06: ("alternatorTemperature", "temperature",
+           lambda v: v - 114 + KELVIN),
+    0x08: ("fieldDrive", "fieldDrive", lambda v: v / 100.0),
+    0x02: ("chargeStage", "chargeStage", lambda v: v),
+    0x2C: ("absorptionVoltage", "absorptionVoltage", lambda v: v / 50.0),
+    0x30: ("floatVoltage", "floatVoltage", lambda v: v / 50.0),
+}
+
+# Pages whose raw 255 means "sensor not fitted" rather than a reading
+# (confirmed: battery temp showed "--" on the display while page 0x05
+# read 255).
+MC618_NOT_AVAILABLE = {0x05: 255, 0x06: 255, 0x07: 255}
+
+# Device-name prefix -> page table. Devices report their own name via the
+# cmd 0x04 identity read ("MC-618-STBD", "MC-618--POR", "BANK-01").
+PAGE_TABLES = {"MC-618": MC618_PAGES}
+
+
+def pages_for(device_name):
+    """Pick the page table for a device by its self-reported name."""
+    for prefix, table in PAGE_TABLES.items():
+        if device_name and device_name.startswith(prefix):
+            return table
+    return PAGES
+
+
+def is_not_available(table, page, raw):
+    """True if this raw value is the device's 'no reading' sentinel."""
+    if raw == NOT_AVAILABLE:
+        return True
+    if table is MC618_PAGES:
+        return MC618_NOT_AVAILABLE.get(page) == raw
+    return False
+
+
 # Friendly name -> page code, for configs ("values": ["voltage", ...]).
 PAGE_BY_NAME = {name: page for page, (name, _, _) in PAGES.items()}
+PAGE_BY_NAME.update({name: page for page, (name, _, _) in MC618_PAGES.items()
+                     if name not in PAGE_BY_NAME})
 
 
 def parse_page(token):
@@ -113,10 +161,18 @@ def parse_identity(payload: bytes):
 
 def decode_page_response(payload: bytes):
     """Decode a cmd 0x15 response payload -> (page, raw_value, status)
-    or None if it isn't a response (e.g. it's the 1-byte request)."""
-    if len(payload) != 6:
-        return None
-    page = payload[0]
-    value = int.from_bytes(payload[1:5], "big", signed=True)
-    status = payload[5]
-    return page, value, status
+    or None if it isn't a response (e.g. it's the 1-byte request).
+
+    Two payload layouts are in use (docs/rs-485 decode.md):
+      SG200  : page + 4-byte value + status  (6 bytes)
+      MC-618 : page + 4-byte value           (5 bytes, no status)
+    Requiring 6 bytes silently discarded every regulator reply, so both
+    lengths are accepted; status is None when the device does not send
+    one."""
+    if len(payload) == 6:
+        return payload[0], int.from_bytes(payload[1:5], "big", signed=True), \
+            payload[5]
+    if len(payload) == 5:
+        return payload[0], int.from_bytes(payload[1:5], "big", signed=True), \
+            None
+    return None
