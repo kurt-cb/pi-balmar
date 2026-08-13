@@ -15,6 +15,7 @@ FRAME_START = 0xCD
 ADDR_SHUNT = 0x02
 CMD_STATUS = 0x00
 CMD_IDENT = 0x04
+CMD_KEEPALIVE = 0x11
 CMD_PAGE = 0x15
 
 # Raw value meaning "not available" (blank on the display).
@@ -53,6 +54,24 @@ MC618_PAGES = {
 # (confirmed: battery temp showed "--" on the display while page 0x05
 # read 255).
 MC618_NOT_AVAILABLE = {0x05: 255, 0x06: 255, 0x07: 255}
+
+# The exact page set the Balmar display requests, in its polling order.
+# Replaying the display's own behaviour is the safest way to act as bus
+# master: sweeping undefined page codes and polling at ~22 reads/s hung a
+# regulator until it was power-cycled, while this pattern ran for long
+# stretches against both regulators with no ill effect.
+MC618_DISPLAY_PAGES = [0x03, 0x04, 0x08, 0x05, 0x06, 0x02, 0x24, 0x2E,
+                       0x30, 0x26, 0x2C]
+
+# Cadence measured from the display over a 586 s capture:
+#   keepalive to each regulator  3.87/s
+#   status poll to the shunt     3.88/s
+#   each page                    0.35/s  (11 pages / 2.84 s)
+# which is one cycle of [keepalive per device, shunt status, one page per
+# device] every 258 ms. Inter-frame gap: median 33 ms, 10th pct 12 ms —
+# always above the 10 ms floor below which frames are ignored entirely.
+DISPLAY_CYCLE = 0.258
+DISPLAY_TX_GAP = 0.030
 
 # Device-name prefix -> page table. Devices report their own name via the
 # cmd 0x04 identity read ("MC-618-STBD", "MC-618--POR", "BANK-01").

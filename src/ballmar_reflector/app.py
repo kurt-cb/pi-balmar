@@ -24,6 +24,7 @@ import argparse
 import errno
 import json
 import os
+import re
 import select
 import sys
 import termios
@@ -40,6 +41,42 @@ BAUDS = {9600: termios.B9600, 19200: termios.B19200, 38400: termios.B38400,
 # (measured: 10 ms gap -> 99% answered, 0 ms -> 0%).
 TX_GAP = 0.012
 RESCAN_INTERVAL = 60.0
+
+# Master-mode health limits. A regulator that wedges stops answering
+# entirely, so a sustained low reply rate is the signal to back off.
+HEALTH_INTERVAL = 30.0
+HEALTH_MIN_SAMPLES = 20
+HEALTH_MIN_RATE = 0.5
+MUTE_SECONDS = 300.0
+
+# The regulators are powered from an oil-pressure switch, so they exist
+# only while an engine runs. Rather than poll a dead bus, idle at a slow
+# probe and wake when something answers.
+IDLE_PROBE_INTERVAL = 60.0
+ACTIVE_TIMEOUT = 20.0
+# Identity replies decide Signal K paths; retry rather than let a lost
+# reply rename a device.
+IDENT_ATTEMPTS = 4
+# Probed while idle: the two regulator slots the Balmar master always
+# polls, plus the shunt and gateway addresses.
+CANDIDATE_ADDRS = (0x81, 0x82, 0x02, 0x03)
+
+
+def auto_prefix(name, addr):
+    """Signal K path prefix for a device from its self-reported name.
+
+    Devices store their own name (cmd 0x04), so a bus can be mapped
+    without configuration: "MC-618-STBD" -> electrical.alternators.stbd,
+    "BANK-01" -> electrical.batteries.bank01.
+    """
+    text = (name or "").strip()
+    if text.upper().startswith("MC-618"):
+        tag = re.sub(r"[^a-z0-9]+", "", text[6:].lower()) or f"{addr:02x}"
+        return f"electrical.alternators.{tag}."
+    tag = re.sub(r"[^a-z0-9]+", "", text.lower())
+    if not tag:
+        return f"electrical.devices.x{addr:02x}."
+    return f"electrical.batteries.{tag}."
 
 
 def log(msg):
@@ -79,13 +116,20 @@ def scan_bus(fd, parser, addrs=range(256)):
             if c == smartlink.CMD_STATUS and len(pl) == 1:
                 found[a] = {"status": pl[0], "header": "", "name": ""}
         time.sleep(TX_GAP)
-    for addr in list(found):
-        os.write(fd, smartlink.build_frame(addr, smartlink.CMD_IDENT))
-        for a, c, pl in _collect(fd, parser, 0.08):
-            if c == smartlink.CMD_IDENT and len(pl) > 1 and a in found:
-                header, name = smartlink.parse_identity(pl)
-                found[a].update(header=header, name=name)
-        time.sleep(TX_GAP)
+    # Names decide Signal K paths, so a dropped identity reply must not
+    # silently rename a device. Retry any device still unnamed — replies
+    # are regularly lost to collisions with other traffic on this bus.
+    for _ in range(IDENT_ATTEMPTS):
+        pending = [a for a, info in found.items() if not info["name"]]
+        if not pending:
+            break
+        for addr in pending:
+            os.write(fd, smartlink.build_frame(addr, smartlink.CMD_IDENT))
+            for a, c, pl in _collect(fd, parser, 0.08):
+                if c == smartlink.CMD_IDENT and len(pl) > 1 and a in found:
+                    header, name = smartlink.parse_identity(pl)
+                    found[a].update(header=header, name=name)
+            time.sleep(TX_GAP)
     return found
 
 
@@ -135,6 +179,16 @@ def parse_args(argv=None):
     p.add_argument("--map", action="append", default=[], metavar="ADDR=PREFIX",
                    help="map a bus address to a Signal K path prefix "
                         "(manual alternative to config-file device names)")
+    p.add_argument("--emulate-display", action="store_true",
+                   help="act as bus master by replaying the Balmar "
+                        "display's own poll pattern (its exact page set "
+                        "and 258 ms cadence). Required to read MC-618 "
+                        "regulators when no display is present, since no "
+                        "other master ever requests regulator pages.")
+    p.add_argument("--shunt-addr", type=lambda x: int(x, 0), default=0x03,
+                   help="address status-polled for the shunt in "
+                        "--emulate-display mode (default: 0x03, what the "
+                        "display uses)")
     p.add_argument("--poll", metavar="PAGES",
                    help="act as bus master: comma-separated page codes "
                         "(e.g. 0x03,0x05,0x06). Required when no display "
@@ -254,7 +308,7 @@ def run(args):
     sender = senders or None
 
     parser = smartlink.FrameParser()
-    writable = bool(args.poll_pages or args.name_config
+    writable = bool(args.poll_pages or args.name_config or args.emulate_display
                     or any(d["pages"] for d in args.name_config.values()))
     last_sent, last_value = {}, {}
     n_frames = n_pages = 0
@@ -264,6 +318,16 @@ def run(args):
     poll_idx = 0
     fd = None
     device_map, rotation, unmatched = dict(args.device_map), [], set()
+    # Display-emulation master state.
+    tx_queue = []
+    next_cycle = next_tx = time.monotonic()
+    expect, answered = {}, {}          # page requests sent / replied, per addr
+    muted = {}                         # addr -> monotonic time to resume
+    next_health = time.monotonic() + HEALTH_INTERVAL
+    active = not args.emulate_display  # emulation starts idle until something answers
+    woke = False
+    last_reply = time.monotonic()
+    next_probe = time.monotonic()
 
     while True:
         if fd is None:
@@ -303,10 +367,85 @@ def run(args):
                 continue
             raise
 
-        # Active polling, display-style: status poll + page request per
-        # tick, round-robin over (device, page). The status cadence also
-        # wakes a shunt that idled during bus silence.
-        if rotation and time.monotonic() >= next_poll:
+        # Master mode. Frames are queued and paced one per loop pass
+        # rather than written back-to-back, so replies keep being read
+        # between our transmissions and the inter-frame gap is honoured.
+        now_m = time.monotonic()
+
+        # Engines off -> regulators unpowered -> nothing to talk to.
+        # Idle at a slow probe instead of polling a dead bus, and wake as
+        # soon as anything answers.
+        if args.emulate_display and active and \
+                now_m - last_reply > ACTIVE_TIMEOUT:
+            active = False
+            device_map = {}
+            log("devices stopped responding (engines off?) — idling, "
+                f"probing every {IDLE_PROBE_INTERVAL:.0f}s")
+        if args.emulate_display and not active:
+            if not tx_queue and now_m >= next_probe:
+                next_probe = now_m + IDLE_PROBE_INTERVAL
+                for a in CANDIDATE_ADDRS:
+                    tx_queue.append(
+                        smartlink.build_frame(a, smartlink.CMD_KEEPALIVE))
+                    tx_queue.append(
+                        smartlink.build_frame(a, smartlink.CMD_STATUS))
+            if tx_queue and now_m >= next_tx:
+                try:
+                    os.write(fd, tx_queue.pop(0))
+                except OSError as e:
+                    log(f"probe write failed: {e}")
+                next_tx = now_m + smartlink.DISPLAY_TX_GAP
+            if woke:
+                woke = False
+                log("device answered — scanning the bus")
+                found = scan_bus(fd, parser, CANDIDATE_ADDRS)
+                device_map = {}
+                for a, info in sorted(found.items()):
+                    if not info["name"]:
+                        # Publishing under a fallback path risks the data
+                        # moving when the name does turn up. Wait instead.
+                        log(f"  0x{a:02X} answered but would not identify "
+                            f"— skipping until it names itself")
+                        continue
+                    prefix = auto_prefix(info["name"], a)
+                    device_map[a] = (prefix, info["name"])
+                    log(f"  0x{a:02X} {info['name']!r} -> {prefix}")
+                if device_map:
+                    active = True
+                    last_reply = time.monotonic()
+                    expect.clear()
+                    answered.clear()
+                    muted.clear()
+                    next_cycle = time.monotonic()
+
+        if args.emulate_display and active and device_map:
+            if not tx_queue and now_m >= next_cycle:
+                addrs = sorted(device_map)
+                pages = smartlink.MC618_DISPLAY_PAGES
+                # Keepalives always go out — they are what the display
+                # sends regardless, and they let a muted device show it
+                # is alive again.
+                for a in addrs:
+                    tx_queue.append(
+                        smartlink.build_frame(a, smartlink.CMD_KEEPALIVE))
+                if args.shunt_addr is not None:
+                    tx_queue.append(smartlink.build_frame(
+                        args.shunt_addr, smartlink.CMD_STATUS))
+                for a in addrs:
+                    if muted.get(a, 0) > now_m:
+                        continue
+                    page = pages[poll_idx % len(pages)]
+                    tx_queue.append(smartlink.build_page_request(page, a))
+                    expect[a] = expect.get(a, 0) + 1
+                poll_idx += 1
+                next_cycle = now_m + smartlink.DISPLAY_CYCLE
+            if tx_queue and now_m >= next_tx:
+                try:
+                    os.write(fd, tx_queue.pop(0))
+                except OSError as e:
+                    log(f"master write failed: {e}")
+                next_tx = now_m + smartlink.DISPLAY_TX_GAP
+        elif rotation and now_m >= next_poll:
             addr, page = rotation[poll_idx % len(rotation)]
             poll_idx += 1
             try:
@@ -315,11 +454,18 @@ def run(args):
                 os.write(fd, smartlink.build_page_request(page, addr))
             except OSError as e:
                 log(f"poll write failed: {e}")
-            next_poll = time.monotonic() + args.poll_interval / len(rotation)
+            next_poll = now_m + args.poll_interval / len(rotation)
 
         values = []
         for addr, cmd, payload in parser.feed(data):
             n_frames += 1
+            # Any reply at all is proof a device is powered: it marks the
+            # bus alive for the idle/active state machine, whether or not
+            # it carries data we publish.
+            if payload:
+                last_reply = time.monotonic()
+                if not active:
+                    woke = True
             if cmd != smartlink.CMD_PAGE:
                 continue
             decoded = smartlink.decode_page_response(payload)
@@ -327,6 +473,7 @@ def run(args):
                 continue
             page, raw, status = decoded
             n_pages += 1
+            answered[addr] = answered.get(addr, 0) + 1
             # The reply layout identifies the device type: MC-618
             # regulators answer with 5 bytes (no status), SG200-family
             # devices with 6. Page meanings and scaling differ between
@@ -366,6 +513,28 @@ def run(args):
                 ok = any([s.send(delta) for s in senders])
                 if ok and args.verbose:
                     print(delta.decode().rstrip(), flush=True)
+
+        # Health check: a regulator that stops answering needs a power
+        # cycle, and continuing to poll one that is struggling is what
+        # wedged 0x81 during protocol discovery. Back off instead.
+        if args.emulate_display and now >= next_health:
+            next_health = now + HEALTH_INTERVAL
+            for addr in sorted(expect):
+                sent, got = expect[addr], answered.get(addr, 0)
+                if sent < HEALTH_MIN_SAMPLES:
+                    continue
+                rate = got / float(sent)
+                if rate < HEALTH_MIN_RATE and muted.get(addr, 0) <= now:
+                    muted[addr] = now + MUTE_SECONDS
+                    log(f"0x{addr:02X} answered {got}/{sent} page reads "
+                        f"({rate:.0%}) — pausing page reads for "
+                        f"{MUTE_SECONDS:.0f}s (keepalives continue)")
+                elif rate >= HEALTH_MIN_RATE and addr in muted:
+                    del muted[addr]
+                    log(f"0x{addr:02X} answering again ({rate:.0%}); "
+                        f"resuming page reads")
+            expect.clear()
+            answered.clear()
 
         if args.stats_interval > 0 and now - last_stats >= args.stats_interval:
             tx = " ".join(f"{type(s).__name__}: sent={s.sent} errors={s.errors}"
